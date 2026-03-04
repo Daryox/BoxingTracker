@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from logic.models.visual.tracking.deepsorttrack import DeepSortPersonTracker, TrackResult
 from logic.models.visual.tracking.joint_speed import JointSpeedByTrack
 
 
@@ -106,7 +105,7 @@ class YoloPoseWebcam:
                 if self.show_fps:
                     cv2.putText(annotated, f"FPS: {self._fps:.1f}", (20, 40),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.imshow("YOLO Pose + DeepSORT", annotated)
+                cv2.imshow("Boxing Tracker", annotated)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
                 continue
@@ -186,7 +185,7 @@ class YoloPoseWebcam:
                 cv2.putText(annotated, f"FPS: {self._fps:.1f}", (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
-            cv2.imshow("YOLO Pose + DeepSORT", annotated)
+            cv2.imshow("Boxing Tracker", annotated)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
