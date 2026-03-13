@@ -1,114 +1,72 @@
-#small PyTorch TCN (dilated 1D conv). Keep it light so it can run real-time on CPU
-#class logits for ["none","jab","cross", ,"Lhook", "Rhook","Luppercut", "Ruppercut"]
-#"punchness” head for punch vs not-punch binary classification, to filter proposals before classifying punch type. This should help reduce false positives and improve overall accuracy.
-
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import random
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset, DataLoader
 
-# Local imports from your project
 from logic.models.visual.punches.features import PoseFeatureExtractor
 from logic.models.visual.punches.TCN_model import TCNClassifier, TCNConfig, save_checkpoint
 
 
-# ----------------------------
-# Config / label parsing
-# ----------------------------
+# -----------------------------
+# Label mapping
+# -----------------------------
 
-# Fallback class tokens -> class name mapping.
-# EDIT THESE TOKENS to match your BoxingVI filename conventions.
-#
-# Common BoxingVI 6-class naming (paper):
-#   jab, cross, lead_hook, lead_uppercut, rear_hook, rear_uppercut
-#
-# But your npy filenames might instead contain numbers or abbreviations.
-CLASS_TOKENS: Dict[str, str] = {
+CLASS_MAP: Dict[str, str] = {
     "jab": "jab",
     "cross": "cross",
     "lead_hook": "lead_hook",
-    "lhook": "lead_hook",
-    "lead_uppercut": "lead_uppercut",
-    "luppercut": "lead_uppercut",
     "rear_hook": "rear_hook",
-    "rhook": "rear_hook",
+    "lead_uppercut": "lead_uppercut",
     "rear_uppercut": "rear_uppercut",
-    "ruppercut": "rear_uppercut",
-    # If your dataset uses generic hook/uppercut without lead/rear:
-    "hook": "hook",
-    "uppercut": "uppercut",
 }
 
-# Optional: if your filenames include "S01", "S02", ... you can split by subject.
-SUBJECT_REGEX = re.compile(r"(?:^|[_\-])S(\d{1,2})(?:[_\-]|$)", re.IGNORECASE)
+def norm_label(s: str) -> str:
+    s = str(s).strip().lower().replace(" ", "_")
+    return CLASS_MAP.get(s, s)
 
 
-@dataclass
-class TrainArgs:
-    data_dir: Path
-    out_dir: Path
-    seed: int = 1337
-
-    # Sequence processing
-    fps: float = 30.0
-    T: int = 25  # BoxingVI often uses 25 frames padded; adjust if your clips differ.
-
-    # Training
-    batch_size: int = 64
-    epochs: int = 30
-    lr: float = 1e-3
-    weight_decay: float = 1e-4
-    num_workers: int = 2
-
-    # Model
-    channels: Tuple[int, ...] = (128, 128, 128)
-    kernel_size: int = 3
-    dropout: float = 0.2
-
-    # Splitting
-    split_mode: str = "subject"  # subject | random
-    val_ratio: float = 0.2
-    train_subjects_max: int = 15  # if split_mode=subject, use S1..S15 train, S16..S20 val by default
-
-    # Labels
-    labels_csv: Optional[Path] = None  # CSV with columns: file,label
-    labels_json: Optional[Path] = None  # JSON dict: { "relative/path.npy": "jab", ... }
-
-    # Device
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-# ----------------------------
-# Pose loading + feature conversion (npy -> (T,F))
-# ----------------------------
-
-def ensure_kpts_k3(arr: np.ndarray) -> np.ndarray:
+# -----------------------------
+# Helpers: pose loading
+# -----------------------------
+def ensure_kpts_t_k_3(arr: np.ndarray) -> np.ndarray:
     """
-    Convert various BoxingVI npy shapes into (T, 17, 3).
+    Ensure pose array is either:
+      - (T, 17, 3)  OR
+      - (N, T, 17, 3)
+
     Supports:
-      (T, 17, 3)
-      (T, 17, 2) -> add conf=1
-      (T, 51) -> reshape to (T,17,3)
-      (T, 34) -> reshape to (T,17,2) then add conf
+      (T,17,3)
+      (T,17,2) -> adds conf=1
+      (T,51) or (T,34)
+      (N,T,17,3)
+      (N,T,17,2) -> adds conf=1
     """
     arr = np.asarray(arr)
+
+    # Case: (N, T, 17, C)
+    if arr.ndim == 4 and arr.shape[2] == 17 and arr.shape[3] in (2, 3):
+        if arr.shape[3] == 2:
+            conf = np.ones((arr.shape[0], arr.shape[1], 17, 1), dtype=arr.dtype)
+            arr = np.concatenate([arr, conf], axis=3)
+        return arr.astype(np.float32)
+
+    # Case: (T, 17, C)
     if arr.ndim == 3 and arr.shape[1] == 17 and arr.shape[2] in (2, 3):
         if arr.shape[2] == 2:
             conf = np.ones((arr.shape[0], 17, 1), dtype=arr.dtype)
             arr = np.concatenate([arr, conf], axis=2)
         return arr.astype(np.float32)
 
+    # Case: (T, 51) or (T, 34)
     if arr.ndim == 2 and arr.shape[1] in (34, 51):
         T = arr.shape[0]
         if arr.shape[1] == 34:
@@ -119,129 +77,241 @@ def ensure_kpts_k3(arr: np.ndarray) -> np.ndarray:
             arr = arr.reshape(T, 17, 3)
         return arr.astype(np.float32)
 
-    raise ValueError(f"Unexpected pose npy shape: {arr.shape}")
+    raise ValueError(f"Unexpected npy pose shape: {arr.shape}")
 
 
-def clip_to_features(
-    pose_npy_path: Path,
+def segment_to_features(
+    kpts_seg: np.ndarray,            # (Tseg, 17, 3)
     extractor: PoseFeatureExtractor,
     fps: float,
     T_out: int,
 ) -> np.ndarray:
     """
-    Loads one pose clip and returns features shaped (T_out, F), padded/truncated.
-    Uses a fake bbox [0,0,1,1] assuming pose coords are already normalized.
+    Convert a pose segment (already trimmed) into (T_out, F) using features.py.
+    Pads/truncates to T_out frames.
     """
-    raw = np.load(str(pose_npy_path), allow_pickle=True)
-    kpts_t_k_3 = ensure_kpts_k3(raw)  # (T,17,3)
+    kpts_seg = ensure_kpts_t_k_3(kpts_seg)
 
-    bbox = np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32)
+    bbox = np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32)  # pose already normalized
+    extractor.reset_track(track_id=0)
 
     feats = []
-    extractor.reset_track(track_id=0)
-    for i in range(kpts_t_k_3.shape[0]):
+    for i in range(kpts_seg.shape[0]):
         t = i / fps
-        feat = extractor.update(track_id=0, t=t, bbox_xyxy=bbox, kpts_k3=kpts_t_k_3[i])
+        feat = extractor.update(track_id=0, t=t, bbox_xyxy=bbox, kpts_k3=kpts_seg[i])
         feats.append(feat)
 
-    feats = np.stack(feats, axis=0).astype(np.float32)  # (T,F)
+    feats = np.stack(feats, axis=0).astype(np.float32)  # (Tseg, F)
 
-    T = feats.shape[0]
-    F = feats.shape[1]
-    if T >= T_out:
+    Tseg, F = feats.shape
+    if Tseg >= T_out:
         return feats[:T_out]
-    pad = np.zeros((T_out - T, F), dtype=np.float32)
+    pad = np.zeros((T_out - Tseg, F), dtype=np.float32)
     return np.concatenate([feats, pad], axis=0)
 
 
-# ----------------------------
-# Label loading
-# ----------------------------
+# -----------------------------
+# Build samples from Excel
+# -----------------------------
+@dataclass
+class Sample:
+    video_id: str          # e.g. "V1"
+    start: int             # start frame (inclusive)
+    end: int               # end frame (inclusive)
+    y: int                 # class index
 
-def load_labels_json(path: Path) -> Dict[str, str]:
+
+def load_excel_segments(xlsx_path: Path) -> pd.DataFrame:
     """
-    JSON format:
-      { "subdir/file.npy": "jab", "file2.npy": "cross", ... }
-    Paths are relative to data_dir.
+    Robustly loads BoxingVI label Excel files.
+
+    Supports:
+    - Proper headers (Start_Frame / Ending_Frame / Class)
+    - Alternate headers (start, end, class, etc.)
+    - No headers at all (columns become Unnamed: X) -> fallback:
+      use first 3 non-empty columns as (start, end, class)
+
+    Returns df with columns: start(int), end(int), cls(str)
     """
-    with open(path, "r", encoding="utf-8") as f:
-        obj = json.load(f)
-    if not isinstance(obj, dict):
-        raise ValueError("labels_json must be a dict mapping relative path -> label")
-    return {str(k): str(v) for k, v in obj.items()}
+    # Try normal read first
+    df = pd.read_excel(xlsx_path)
 
+    # Drop columns that are entirely empty
+    df = df.dropna(axis=1, how="all")
+    # Drop rows that are entirely empty
+    df = df.dropna(axis=0, how="all")
 
-def load_labels_csv(path: Path) -> Dict[str, str]:
-    """
-    CSV format (header required):
-      file,label
-      some.npy,jab
-      subdir/other.npy,cross
-    """
-    import csv
-    out: Dict[str, str] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        if "file" not in r.fieldnames or "label" not in r.fieldnames:
-            raise ValueError("labels_csv must have columns: file,label")
-        for row in r:
-            out[str(row["file"]).strip()] = str(row["label"]).strip()
-    return out
+    def normalize_cols(cols):
+        return [str(c).strip().lower().replace(" ", "_") for c in cols]
 
-
-def infer_label_from_filename(p: Path) -> Optional[str]:
-    """
-    Fallback: infer label by substring match in filename stem.
-    Adjust CLASS_TOKENS to match your naming convention.
-    """
-    name = p.stem.lower()
-    # match longer tokens first (lead_uppercut before uppercut)
-    tokens = sorted(CLASS_TOKENS.keys(), key=len, reverse=True)
-    for tok in tokens:
-        if tok in name:
-            return CLASS_TOKENS[tok]
-    return None
-
-
-def infer_subject_id(p: Path) -> Optional[int]:
-    m = SUBJECT_REGEX.search(p.as_posix())
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except Exception:
+    def find_col(cols_norm, keywords):
+        for i, c in enumerate(cols_norm):
+            for kw in keywords:
+                if kw in c:
+                    return i
         return None
 
+    # If columns are meaningful (not all Unnamed), try to locate by name
+    cols_norm = normalize_cols(df.columns)
 
-# ----------------------------
-# Dataset
-# ----------------------------
+    # Detect if this looks like the "Unnamed: ..." headerless case
+    unnamed_ratio = sum(c.startswith("unnamed") for c in cols_norm) / max(1, len(cols_norm))
 
-class PoseClipDataset(Dataset):
-    def __init__(
-        self,
-        items: List[Tuple[Path, int]],
-        fps: float,
-        T: int,
-        feature_extractor: Optional[PoseFeatureExtractor] = None,
-    ):
-        self.items = items
+    if unnamed_ratio < 0.8:
+        # Attempt to pick named columns
+        start_i = find_col(cols_norm, ["start_frame", "start"])
+        end_i = find_col(cols_norm, ["ending_frame", "end_frame", "ending", "end"])
+        cls_i = find_col(cols_norm, ["class", "label", "punch", "type", "action"])
+
+        if start_i is not None and end_i is not None and cls_i is not None:
+            out = df.iloc[:, [start_i, end_i, cls_i]].copy()
+            out.columns = ["start", "end", "cls"]
+        else:
+            # Fall back to headerless parsing
+            out = None
+    else:
+        out = None
+
+    if out is None:
+        # Headerless fallback: read raw sheet with no header
+        raw = pd.read_excel(xlsx_path, header=None)
+
+        raw = raw.dropna(axis=1, how="all")
+        raw = raw.dropna(axis=0, how="all")
+
+        if raw.shape[1] < 3:
+            raise ValueError(
+                f"{xlsx_path.name}: expected at least 3 columns for (start,end,class), got {raw.shape[1]}"
+            )
+
+        # Use first 3 columns by position (most reliable in your dataset)
+        out = raw.iloc[:, [0, 1, 2]].copy()
+        out.columns = ["start", "end", "cls"]
+
+    # Clean types
+    out = out.dropna(axis=0, how="any")  # rows must have all 3 fields
+
+    # start/end must be ints; coerce safely
+    out["start"] = pd.to_numeric(out["start"], errors="coerce")
+    out["end"] = pd.to_numeric(out["end"], errors="coerce")
+    out["cls"] = out["cls"].astype(str).str.strip()
+
+    out = out.dropna(axis=0, subset=["start", "end"])
+    out["start"] = out["start"].astype(int)
+    out["end"] = out["end"].astype(int)
+
+    # Keep only valid ranges
+    out = out[out["end"] >= out["start"]]
+
+    # Filter out blank/garbage class entries (sometimes empty strings or 'nan')
+    out = out[out["cls"].str.lower().isin(["nan", "none", ""]) == False]
+
+    return out.reset_index(drop=True)
+
+
+def build_clip_items(
+    skeleton_dir: Path,
+    labels_dir: Path,
+) -> Tuple[List[Tuple[Path, int, str]], Dict[str, int]]:
+    """
+    Returns:
+      items: list of (video_npy_path, clip_idx, label_name)
+      class_to_idx
+    Assumes: Excel row order corresponds to clip index in .npy (0..N-1).
+    """
+    xlsx_files = sorted(labels_dir.glob("*.xlsx"))
+    if not xlsx_files:
+        raise FileNotFoundError(f"No .xlsx files found in {labels_dir}")
+
+    items: List[Tuple[Path, int, str]] = []
+    classes = set()
+
+    for xf in xlsx_files:
+        video_id = xf.stem
+        npy_path = skeleton_dir / f"{video_id}.npy"
+        if not npy_path.exists():
+            print(f"[WARN] Missing matching npy for {xf.name}: expected {npy_path.name}")
+            continue
+
+        df = load_excel_segments(xf)  # still returns start/end/cls but we only use cls + row index
+        df = df.reset_index(drop=True)
+
+        # Load npy just to verify clip count
+        arr = np.load(str(npy_path), allow_pickle=True)
+        arr = ensure_kpts_t_k_3(arr)
+        if arr.ndim != 4:
+            raise ValueError(f"{npy_path.name} is not clip-based (N,T,17,C). Got {arr.shape}")
+        n_clips = arr.shape[0]
+
+        n_rows = len(df)
+        n = min(n_clips, n_rows)
+        if n_rows != n_clips:
+            print(f"[WARN] {video_id}: excel rows={n_rows} vs npy clips={n_clips}. Using min={n}.")
+
+        for clip_idx in range(n):
+            label = norm_label(df.loc[clip_idx, "cls"])
+            items.append((npy_path, clip_idx, label))
+            classes.add(label)
+
+    if not items:
+        raise RuntimeError("No clip items created. Check that labels and npy files align.")
+
+    class_names = sorted(classes)
+    class_to_idx = {c: i for i, c in enumerate(class_names)}
+    print(f"Built {len(items)} clip items.")
+    print(f"Classes: {class_to_idx}")
+    return items, class_to_idx
+
+
+# -----------------------------
+# Dataset with caching (important!)
+# -----------------------------
+class ClipDataset(Dataset):
+    """
+    Each .npy file contains (N, T, 17, C) clips.
+    Each Excel file contains N rows with labels (start/end might exist but not needed).
+    We train by matching row index -> clip index.
+    """
+    def __init__(self, clip_items, fps: float, T: int):
+        self.items = clip_items  # list of (npy_path, clip_idx, y)
         self.fps = fps
         self.T = T
-        self.fx = feature_extractor or PoseFeatureExtractor()
+        self.fx = PoseFeatureExtractor()
+        self._cache = {}  # npy_path -> np.ndarray (N,T,17,3)
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.items)
 
-    def __getitem__(self, idx: int):
-        path, y = self.items[idx]
-        x = clip_to_features(path, extractor=self.fx, fps=self.fps, T_out=self.T)  # (T,F)
+    def _load(self, npy_path: Path) -> np.ndarray:
+        key = str(npy_path)
+        if key in self._cache:
+            return self._cache[key]
+        arr = np.load(key, allow_pickle=True)
+        arr = ensure_kpts_t_k_3(arr)  # now supports (N,T,17,3)
+        if arr.ndim != 4:
+            raise ValueError(f"Expected (N,T,17,3) in {npy_path.name}, got {arr.shape}")
+        self._cache[key] = arr
+        return arr
+
+    def __getitem__(self, idx):
+        npy_path, clip_idx, y = self.items[idx]
+        clips = self._load(npy_path)
+        clip_idx = int(clip_idx)
+        clip = clips[clip_idx]  # (T,17,3)
+
+        x = segment_to_features(clip, extractor=self.fx, fps=self.fps, T_out=self.T)  # (T,F)
         return torch.from_numpy(x), torch.tensor(y, dtype=torch.long)
 
 
-# ----------------------------
-# Training helpers
-# ----------------------------
+# -----------------------------
+# Training utils
+# -----------------------------
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 
 @torch.inference_mode()
 def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Tuple[float, float]:
@@ -252,7 +322,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Tuple[float, 
     correct = 0
 
     for x, y in loader:
-        x = x.to(device)  # (B,T,F)
+        x = x.to(device)
         y = y.to(device)
         logits = model(x)
         loss = crit(logits, y)
@@ -266,155 +336,50 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str) -> Tuple[float, 
     return total_loss / total, correct / total
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-# ----------------------------
+# -----------------------------
 # Main
-# ----------------------------
-
-def build_items(args: TrainArgs) -> Tuple[List[Tuple[Path, int]], List[Tuple[Path, int]], Dict[str, int]]:
-    """
-    Builds (train_items, val_items, class_to_idx)
-    """
-    # Load explicit labels if provided
-    explicit: Dict[str, str] = {}
-    if args.labels_json and args.labels_json.exists():
-        explicit = load_labels_json(args.labels_json)
-    elif args.labels_csv and args.labels_csv.exists():
-        explicit = load_labels_csv(args.labels_csv)
-
-    # Scan npy files
-    npy_paths = sorted(args.data_dir.rglob("*.npy"))
-    if not npy_paths:
-        raise FileNotFoundError(f"No .npy files found under {args.data_dir}")
-
-    # Collect labels
-    labeled: List[Tuple[Path, str, Optional[int]]] = []
-    skipped = 0
-    for p in npy_paths:
-        rel = p.relative_to(args.data_dir).as_posix()
-        label = explicit.get(rel, None)
-        if label is None:
-            label = infer_label_from_filename(p)
-        if label is None:
-            skipped += 1
-            continue
-        subj = infer_subject_id(p)
-        labeled.append((p, label, subj))
-
-    if not labeled:
-        raise RuntimeError(
-            "Found .npy files but could not assign any labels. "
-            "Either provide labels_csv/labels_json under ./data or adjust CLASS_TOKENS."
-        )
-
-    # Build class_to_idx
-    class_names = sorted({lab for _, lab, _ in labeled})
-    class_to_idx = {c: i for i, c in enumerate(class_names)}
-
-    # Convert to items with y index
-    all_items = [(p, class_to_idx[lab], subj) for (p, lab, subj) in labeled]
-
-    # Split
-    if args.split_mode == "subject":
-        # Default: S1..S15 train, S16..S20 val (if subject ids exist)
-        train_items: List[Tuple[Path, int]] = []
-        val_items: List[Tuple[Path, int]] = []
-        has_subjects = any(subj is not None for _, _, subj in all_items)
-
-        if not has_subjects:
-            # fall back to random split
-            args.split_mode = "random"
-        else:
-            for p, y, subj in all_items:
-                if subj is None:
-                    # If subject missing, put in train by default
-                    train_items.append((p, y))
-                elif subj <= args.train_subjects_max:
-                    train_items.append((p, y))
-                else:
-                    val_items.append((p, y))
-
-            # If val ended empty (weird naming), fall back
-            if not val_items:
-                args.split_mode = "random"
-
-    if args.split_mode == "random":
-        pairs = [(p, y) for (p, y, _) in all_items]
-        random.shuffle(pairs)
-        n_val = max(1, int(len(pairs) * args.val_ratio))
-        val_items = pairs[:n_val]
-        train_items = pairs[n_val:]
-
-    print(f"Total .npy found: {len(npy_paths)}")
-    print(f"Labeled clips:   {len(labeled)}")
-    print(f"Skipped (no label): {skipped}")
-    print(f"Classes ({len(class_to_idx)}): {class_to_idx}")
-    print(f"Train items: {len(train_items)} | Val items: {len(val_items)}")
-
-    return train_items, val_items, class_to_idx
-
-
+# -----------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, default=str(Path(__file__).parent / "data"))
-    parser.add_argument("--out_dir", type=str, default=str(Path(__file__).parent / "checkpoints"))
-    parser.add_argument("--labels_csv", type=str, default="")
-    parser.add_argument("--labels_json", type=str, default="")
-    parser.add_argument("--split_mode", type=str, default="subject", choices=["subject", "random"])
-    parser.add_argument("--val_ratio", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=1337)
-
+    parser.add_argument("--data_root", type=str, default=str(Path(__file__).parent / "data"))
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--T", type=int, default=25)
-
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--num_workers", type=int, default=0)  # Windows: start with 0
+    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--val_ratio", type=float, default=0.2)
+    parser.add_argument("--out_dir", type=str, default=str(Path(__file__).parent / "checkpoints"))
 
     parser.add_argument("--channels", type=str, default="128,128,128")
     parser.add_argument("--kernel_size", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.2)
 
-    args_ns = parser.parse_args()
-
-    args = TrainArgs(
-        data_dir=Path(args_ns.data_dir),
-        out_dir=Path(args_ns.out_dir),
-        seed=args_ns.seed,
-        fps=args_ns.fps,
-        T=args_ns.T,
-        batch_size=args_ns.batch_size,
-        epochs=args_ns.epochs,
-        lr=args_ns.lr,
-        weight_decay=args_ns.weight_decay,
-        num_workers=args_ns.num_workers,
-        channels=tuple(int(x.strip()) for x in args_ns.channels.split(",") if x.strip()),
-        kernel_size=args_ns.kernel_size,
-        dropout=args_ns.dropout,
-        split_mode=args_ns.split_mode,
-        val_ratio=args_ns.val_ratio,
-        labels_csv=Path(args_ns.labels_csv) if args_ns.labels_csv else None,
-        labels_json=Path(args_ns.labels_json) if args_ns.labels_json else None,
-    )
-
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    args = parser.parse_args()
     set_seed(args.seed)
 
-    # Build labeled items
-    train_items, val_items, class_to_idx = build_items(args)
+    data_root = Path(args.data_root)
+    skeleton_dir = data_root / "skeleton"
+    labels_dir = data_root / "labels"
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Datasets / loaders
-    fx = PoseFeatureExtractor()
-    train_ds = PoseClipDataset(train_items, fps=args.fps, T=args.T, feature_extractor=fx)
-    val_ds = PoseClipDataset(val_items, fps=args.fps, T=args.T, feature_extractor=fx)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+
+    # Build list of labeled segments
+    raw_items, class_to_idx = build_clip_items(skeleton_dir, labels_dir)
+
+    all_items = [(p, clip_idx, class_to_idx[label]) for (p, clip_idx, label) in raw_items]
+    random.shuffle(all_items)
+    n_val = max(1, int(len(all_items) * args.val_ratio))
+    val_items = all_items[:n_val]
+    train_items = all_items[n_val:]
+
+    train_ds = ClipDataset(train_items, fps=args.fps, T=args.T)
+    val_ds = ClipDataset(val_items, fps=args.fps, T=args.T)
 
     train_loader = DataLoader(
         train_ds,
@@ -422,7 +387,7 @@ def main():
         shuffle=True,
         num_workers=args.num_workers,
         drop_last=True,
-        pin_memory=(args.device.startswith("cuda")),
+        pin_memory=device == "cuda",
     )
     val_loader = DataLoader(
         val_ds,
@@ -430,70 +395,66 @@ def main():
         shuffle=False,
         num_workers=args.num_workers,
         drop_last=False,
-        pin_memory=(args.device.startswith("cuda")),
+        pin_memory=device == "cuda",
     )
 
     # Model
     F = train_ds[0][0].shape[1]
     num_classes = len(class_to_idx)
 
+    channels = tuple(int(x.strip()) for x in args.channels.split(",") if x.strip())
     cfg = TCNConfig(
         input_dim=F,
         num_classes=num_classes,
-        channels=args.channels,
+        channels=channels,
         kernel_size=args.kernel_size,
         dropout=args.dropout,
         causal=False,
         use_layernorm=True,
     )
-    model = TCNClassifier(cfg).to(args.device)
+    model = TCNClassifier(cfg).to(device)
 
-    # Optim / loss
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     crit = nn.CrossEntropyLoss()
 
-    best_val_acc = -1.0
-    best_path = args.out_dir / "tcn_best.pt"
-    last_path = args.out_dir / "tcn_last.pt"
+    best_acc = -1.0
+    best_path = out_dir / "tcn_best.pt"
+    last_path = out_dir / "tcn_last.pt"
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        running_loss = 0.0
+        running = 0.0
         seen = 0
 
         for x, y in train_loader:
-            x = x.to(args.device)  # (B,T,F)
-            y = y.to(args.device)
+            x = x.to(device)
+            y = y.to(device)
 
             logits = model(x)
             loss = crit(logits, y)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
-            running_loss += float(loss.item()) * x.size(0)
+            running += float(loss.item()) * x.size(0)
             seen += x.size(0)
 
-        train_loss = running_loss / max(1, seen)
-        val_loss, val_acc = evaluate(model, val_loader, args.device)
+        train_loss = running / max(1, seen)
+        val_loss, val_acc = evaluate(model, val_loader, device)
 
-        print(
-            f"Epoch {epoch:03d}/{args.epochs} | "
-            f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.4f}"
-        )
+        print(f"Epoch {epoch:03d}/{args.epochs} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | val_acc={val_acc:.4f}")
 
-        # Save last
+        # save last
         save_checkpoint(str(last_path), model=model, cfg=cfg, class_to_idx=class_to_idx)
 
-        # Save best
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        if val_acc > best_acc:
+            best_acc = val_acc
             save_checkpoint(str(best_path), model=model, cfg=cfg, class_to_idx=class_to_idx)
-            print(f"  ✅ New best: val_acc={best_val_acc:.4f} -> saved {best_path}")
+            print(f" ***New best*** -> {best_path} (val_acc={best_acc:.4f})")
 
-    print(f"Done. Best val_acc={best_val_acc:.4f}")
+    print(f"Done. Best val_acc={best_acc:.4f}")
     print(f"Best checkpoint: {best_path}")
     print(f"Last checkpoint: {last_path}")
 
