@@ -294,12 +294,13 @@ class YoloPoseWebcam:
         # artifacts/logging
         self.artifacts = Path(artifacts_dir)
         self.logger = EventLogger(self.artifacts)
+        self.logger.flush_every_s = 0.25
 
         # ring
         self.calib_path = self.artifacts / "ring_calibration.json"
         self.ring_calib: Optional[RingCalibration] = None
         self.pos_est: Optional[RingPositionEstimator] = None
-        self.heatmap = RingHeatmap(HeatmapConfig(bins=100))
+        self.heatmap = RingHeatmap(HeatmapConfig(bins=5)) # 5x5 grid to ID tactical zones and not get all the noise of a super high-res heatmap
         self.show_heatmap_inset = True
 
         # TCN
@@ -319,7 +320,7 @@ class YoloPoseWebcam:
         else:
             print(f"[TCN] No checkpoint at {self.tcn_ckpt} (running without classification).")
 
-        self.punch_engine = PunchEngine(self.tcn, seq_len=tcn_seq_len)
+        self.punch_engine = PunchEngine(self.tcn, seq_len=tcn_seq_len, min_conf=0.15)
 
         # Try auto-load ring calibration
         self._try_load_calibration()
@@ -376,10 +377,9 @@ class YoloPoseWebcam:
         if hm.max() > 0:
             hm = hm / hm.max()
 
-        # convert to grayscale inset
         inset = (hm * 255).clip(0, 255).astype(np.uint8)
+        inset = cv2.applyColorMap(inset, cv2.COLORMAP_JET)
         inset = cv2.resize(inset, (160, 160), interpolation=cv2.INTER_NEAREST)
-        inset = cv2.cvtColor(inset, cv2.COLOR_GRAY2BGR)
 
         h, w = frame.shape[:2]
         x0, y0 = w - 170, 10
@@ -398,13 +398,18 @@ class YoloPoseWebcam:
         print("  h: toggle heatmap inset")
         print("  r: reset session counters/buffers")
 
+        frame_idx = 0
+        fps_cap = self.cap.get(cv2.CAP_PROP_FPS)
+        fps_cap = fps_cap if fps_cap and fps_cap > 1 else 30.0
+
         while True:
             ret, frame_bgr = self.cap.read()
             if not ret:
                 print("Failed to read frame from camera.")
                 break
 
-            now = time.time()
+            t = frame_idx / fps_cap
+            frame_idx += 1
 
             results = self.model.track(
                 source=frame_bgr,
@@ -435,13 +440,17 @@ class YoloPoseWebcam:
                 self._try_load_calibration()
 
             if key == ord("c"):
-                # freeze current frame and run calibrator
                 ui = RingCalibratorUI(ring_size=(1000, 1000))
                 calib = ui.calibrate_from_frame(frame_bgr.copy())
                 if calib:
                     self.ring_calib = calib
                     self.pos_est = RingPositionEstimator(calib)
                     calib.save(self.calib_path)
+
+                    # Start heatmaps fresh after calibration
+                    self.heatmap = RingHeatmap(HeatmapConfig(bins=5))  # change to 100 if you prefer
+                    self.logger.flush(heatmaps=self.heatmap.as_dict())
+
                     print(f"[RING] Saved calibration: {self.calib_path}")
 
             # no detections
@@ -481,7 +490,7 @@ class YoloPoseWebcam:
                 # Punch detection/classification
                 punch_results = self.punch_engine.update_track(
                     track_id=int(tid),
-                    t=now,
+                    t=t,
                     bbox_xyxy=bbox,
                     kpts_k3=kpts,
                 )

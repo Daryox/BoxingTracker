@@ -106,6 +106,8 @@ class RingCalibratorUI:
         base = frame_bgr.copy()
 
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        h, w = frame_bgr.shape[:2]
+        cv2.resizeWindow(window_name, min(1280, w), min(720, h))
         cv2.setMouseCallback(window_name, self._mouse_cb)
 
         help_lines = [

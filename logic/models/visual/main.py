@@ -27,8 +27,7 @@ def main():
         camera_index=camindex,
         img_size=640,
         conf=0.25,
-        show_fps=True,
-        deepsort_embedder=None, #use mobilenet later for ReID capabilities. I always get pkg_resources not found error when trying to use the embedder, so leaving it out for now.
+        show_fps=True
     )
     app.run()
 

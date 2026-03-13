@@ -1,11 +1,12 @@
 import subprocess
+import sys
 import threading
 
 def run_webcam():
-    subprocess.run(["python", "-m", "logic.models.visual.main"])
+    subprocess.run([sys.executable, "-m", "logic.models.visual.main"])
 
 def run_dashboard():
-    subprocess.run(["streamlit", "run", "app/dashboard.py"])
+    subprocess.run([sys.executable, "-m", "streamlit", "run", "app/streamlit/dashboard.py"])
 
-threading.Thread(target=run_webcam).start()
+threading.Thread(target=run_webcam, daemon=True).start()
 run_dashboard()
