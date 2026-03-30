@@ -47,11 +47,13 @@ pause > nul
 
 echo === Video 6/7: videoplayback (2) ===
 %PYTHON% %TOOL% "%VIDEOS%\videoplayback (2).mp4" "%RAW%\V16_raw.npy" --id V16
+REM This video has too many people in it, the fighterID is not accurate and alternates between all the visible people in the video. Skip it for now.
 echo Done. Press any key for next video...
 pause > nul
 
 echo === Video 7/7: videoplayback ===
 %PYTHON% %TOOL% "%VIDEOS%\videoplayback.mp4" "%RAW%\V17_raw.npy" --id V17
+REM Same issue as V16, skip it for now.
 echo Done.
 
 echo.

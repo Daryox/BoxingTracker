@@ -1,139 +1,29 @@
 {
   "events": [
     {
-      "ts": 1773935910.181147,
-      "fighter_id": 7,
+      "ts": 1774905816.9923391,
+      "event_type": "punch",
+      "fighter_id": 0,
       "arm": "R",
-      "t_peak": 1.0,
-      "punch_type": "cross",
-      "confidence": 1.0,
+      "t_peak": 0.06666666666666667,
+      "punch_type": "jab",
+      "confidence": 0.43767139315605164,
       "landed": false,
       "ring_uv01": null,
-      "img_xy": null
+      "img_xy": null,
+      "round": null,
+      "round_elapsed_s": null
     },
     {
-      "ts": 1773935923.674293,
-      "fighter_id": 70,
-      "arm": "R",
-      "t_peak": 2.933333333333333,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": [
-        13.577716796875,
-        13.29751171875
-      ],
-      "img_xy": [
-        299.3409118652344,
-        298.2467041015625
-      ]
+      "ts": 1774905899.294989,
+      "event_type": "round_start",
+      "round": 1
     },
     {
-      "ts": 1773935933.5385504,
-      "fighter_id": 116,
-      "arm": "L",
-      "t_peak": 4.6,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": [
-        -4.60669775390625,
-        -6.6922021484375
-      ],
-      "img_xy": [
-        209.59561157226562,
-        345.0836486816406
-      ]
-    },
-    {
-      "ts": 1773935935.0892563,
-      "fighter_id": 70,
-      "arm": "L",
-      "t_peak": 5.033333333333333,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": [
-        -0.009328967094421386,
-        -0.07858838653564452
-      ],
-      "img_xy": [
-        418.7959289550781,
-        429.7977294921875
-      ]
-    },
-    {
-      "ts": 1773935936.0140615,
-      "fighter_id": 121,
-      "arm": "L",
-      "t_peak": 5.133333333333334,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": [
-        0.2475548095703125,
-        1.0088290405273437
-      ],
-      "img_xy": [
-        801.5509033203125,
-        467.59375
-      ]
-    },
-    {
-      "ts": 1773935936.7326336,
-      "fighter_id": 70,
-      "arm": "R",
-      "t_peak": 5.0,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": [
-        0.029732690811157227,
-        -0.27066375732421877
-      ],
-      "img_xy": [
-        355.565673828125,
-        431.451416015625
-      ]
-    },
-    {
-      "ts": 1773935936.918075,
-      "fighter_id": 121,
-      "arm": "R",
-      "t_peak": 5.1,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": [
-        -0.48468148803710936,
-        0.408677001953125
-      ],
-      "img_xy": [
-        628.1840209960938,
-        402.202392578125
-      ]
-    },
-    {
-      "ts": 1773935967.4726758,
-      "fighter_id": 150,
-      "arm": "R",
-      "t_peak": 9.033333333333333,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": null,
-      "img_xy": null
-    },
-    {
-      "ts": 1773935973.833598,
-      "fighter_id": 150,
-      "arm": "R",
-      "t_peak": 9.566666666666666,
-      "punch_type": "cross",
-      "confidence": 1.0,
-      "landed": false,
-      "ring_uv01": null,
-      "img_xy": null
+      "ts": 1774905903.8617709,
+      "event_type": "round_end",
+      "round": 1,
+      "duration_s": 4.57
     }
   ]
 }

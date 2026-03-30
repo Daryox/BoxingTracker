@@ -716,7 +716,7 @@ def main() -> None:
     parser.add_argument("--batch_size",   type=int,   default=64)
     parser.add_argument("--epochs",       type=int,   default=100,
                         help="Maximum epochs (early stopping may halt sooner).")
-    parser.add_argument("--patience",     type=int,   default=15,
+    parser.add_argument("--patience",     type=int,   default=25,
                         help="Early stopping: halt if val_acc does not improve for this many epochs.")
     parser.add_argument("--lr",           type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)

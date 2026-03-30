@@ -916,6 +916,8 @@ class YoloPoseWebcam:
         self.artifacts = Path(artifacts_dir)
         self.logger = EventLogger(self.artifacts)
         self.logger.flush_every_s = 0.25  # flush up to 4× per second
+        self._command_path = self.artifacts / "command.json"
+        self._command_path.unlink(missing_ok=True)  # clear any stale command on startup
 
         # ── Round tracking ────────────────────────────────────────────────────
         self.round_number: int   = 0      # increments each time a round starts
@@ -1029,6 +1031,78 @@ class YoloPoseWebcam:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
         cv2.putText(frame, text, (10, h - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2, cv2.LINE_AA)
+
+    def _poll_command(self) -> None:
+        """
+        Check for a command written by the dashboard and execute it.
+
+        The dashboard writes artifacts/command.json with a "cmd" key.
+        This method reads it, acts on it, then deletes the file so the
+        command is consumed exactly once.
+        """
+        if not self._command_path.exists():
+            return
+        try:
+            with open(self._command_path, "r", encoding="utf-8") as f:
+                cmd = json.load(f).get("cmd", "")
+            self._command_path.unlink(missing_ok=True)
+        except Exception:
+            return
+
+        if cmd == "round_start":
+            if self.round_active:
+                print("[ROUND] A round is already active.")
+            else:
+                self.round_number += 1
+                self.round_active  = True
+                self.round_start_t = time.time()
+                self.logger.add_event({
+                    "ts":         self.round_start_t,
+                    "event_type": "round_start",
+                    "round":      self.round_number,
+                }, heatmaps=self.heatmap.as_dict())
+                print(f"[ROUND] Round {self.round_number} started (via dashboard).")
+
+        elif cmd == "round_end":
+            if not self.round_active:
+                print("[ROUND] No active round to end.")
+            else:
+                end_t    = time.time()
+                duration = end_t - self.round_start_t
+                self.round_active = False
+                self.logger.add_event({
+                    "ts":         end_t,
+                    "event_type": "round_end",
+                    "round":      self.round_number,
+                    "duration_s": round(duration, 2),
+                }, heatmaps=self.heatmap.as_dict())
+                print(f"[ROUND] Round {self.round_number} ended (via dashboard) — "
+                      f"{int(duration // 60)}:{int(duration % 60):02d}")
+
+    def _draw_tooltips(self, frame: np.ndarray) -> None:
+        """
+        Draw key-binding tooltips in the bottom-right corner of *frame*.
+
+        Shows hints for the two most interactive controls — ring calibration
+        and heatmap toggle — so the user doesn't need to consult the terminal.
+        """
+        h, w = frame.shape[:2]
+        lines = [
+            "c — calibrate ring",
+            "h — toggle heatmap",
+        ]
+        font       = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.55
+        thickness  = 1
+        line_h     = 20
+        margin     = 10
+
+        for i, line in enumerate(reversed(lines)):
+            y = h - margin - i * line_h
+            # Shadow
+            cv2.putText(frame, line, (w - 190, y), font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            # Text
+            cv2.putText(frame, line, (w - 190, y), font, font_scale, (200, 200, 200), thickness, cv2.LINE_AA)
 
     def _draw_heatmap_inset(self, frame: np.ndarray) -> None:
         """
@@ -1167,6 +1241,8 @@ class YoloPoseWebcam:
                     self.logger.flush(heatmaps=self.heatmap.as_dict())
                     print(f"[RING] Saved calibration: {self.calib_path}")
 
+            self._poll_command()
+
             # ── Skip frame if no detections or tracking IDs ──────────────────
             if (
                 r.boxes is None
@@ -1179,6 +1255,7 @@ class YoloPoseWebcam:
                     cv2.putText(annotated, f"FPS: {self._fps:.1f}", (20, 40),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
                 self._draw_heatmap_inset(annotated)
+                self._draw_tooltips(annotated)
                 cv2.imshow("Boxing Tracker", annotated)
                 continue
 
@@ -1267,6 +1344,7 @@ class YoloPoseWebcam:
 
             self._draw_round_hud(annotated)
             self._draw_heatmap_inset(annotated)
+            self._draw_tooltips(annotated)
             cv2.imshow("Boxing Tracker", annotated)
 
         # ── Graceful shutdown ─────────────────────────────────────────────────

@@ -22,14 +22,26 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from dash import Dash, Input, Output, dash_table, dcc, html
+from dash import Dash, Input, Output, State, dash_table, dcc, html
 import plotly.graph_objects as go
 
-ARTIFACTS   = Path("artifacts")
-STATE_FILE  = ARTIFACTS / "state.json"
-EVENTS_FILE = ARTIFACTS / "events.json"
+ARTIFACTS    = Path("artifacts")
+STATE_FILE   = ARTIFACTS / "state.json"
+EVENTS_FILE  = ARTIFACTS / "events.json"
+COMMAND_FILE = ARTIFACTS / "command.json"
 
 REFRESH_MS = 300
+
+
+def _clear_artifacts() -> None:
+    """Delete all session artifacts so the dashboard starts fresh."""
+    STATE_FILE.unlink(missing_ok=True)
+    EVENTS_FILE.unlink(missing_ok=True)
+    COMMAND_FILE.unlink(missing_ok=True)
+    (ARTIFACTS / "ring_calibration.json").unlink(missing_ok=True)
+
+
+_clear_artifacts()
 
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -61,6 +73,13 @@ def _fmt_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
 
 
+def _write_command(cmd: str) -> None:
+    """Write a command for the pipeline to pick up."""
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    with open(COMMAND_FILE, "w", encoding="utf-8") as f:
+        json.dump({"cmd": cmd}, f)
+
+
 # ── Layout ────────────────────────────────────────────────────────────────────
 
 app = Dash(__name__)
@@ -78,6 +97,36 @@ app.layout = html.Div(
         dcc.Interval(id="interval", interval=REFRESH_MS, n_intervals=0),
 
         html.H1("BoxingTracker Live Dashboard", style={"marginBottom": "24px"}),
+
+        # ── Round controls ────────────────────────────────────────────────────
+        html.Div(
+            style={"display": "flex", "gap": "12px", "marginBottom": "24px"},
+            children=[
+                html.Button(
+                    "▶ Start Round",
+                    id="btn-round-start",
+                    n_clicks=0,
+                    style={
+                        "backgroundColor": "#2ecc71", "color": "black",
+                        "border": "none", "borderRadius": "6px",
+                        "padding": "10px 24px", "fontSize": "15px",
+                        "fontWeight": "bold", "cursor": "pointer",
+                    },
+                ),
+                html.Button(
+                    "⏹ End Round",
+                    id="btn-round-end",
+                    n_clicks=0,
+                    style={
+                        "backgroundColor": "#e74c3c", "color": "white",
+                        "border": "none", "borderRadius": "6px",
+                        "padding": "10px 24px", "fontSize": "15px",
+                        "fontWeight": "bold", "cursor": "pointer",
+                    },
+                ),
+                html.Div(id="round-status", style={"lineHeight": "40px", "color": "#aaaaaa"}),
+            ],
+        ),
 
         # ── Counters ──────────────────────────────────────────────────────────
         html.Div(id="counters", style={"display": "flex", "gap": "16px", "marginBottom": "32px"}),
@@ -117,6 +166,24 @@ def _counter_card(label: str, value: int, colour: str) -> html.Div:
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("round-status", "children"),
+    Input("btn-round-start", "n_clicks"),
+    Input("btn-round-end",   "n_clicks"),
+    State("round-status",    "children"),
+    prevent_initial_call=True,
+)
+def handle_round_buttons(start_clicks, end_clicks, current_status):
+    from dash import ctx
+    if ctx.triggered_id == "btn-round-start":
+        _write_command("round_start")
+        return "Round started"
+    if ctx.triggered_id == "btn-round-end":
+        _write_command("round_end")
+        return "Round ended"
+    return current_status or ""
+
 
 @app.callback(Output("counters", "children"), Input("interval", "n_intervals"))
 def update_counters(_):
