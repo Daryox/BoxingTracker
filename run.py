@@ -3,11 +3,12 @@ run.py — application entry point.
 
 Starts two processes concurrently:
   1. Webcam pipeline  (logic.models.visual.main) — runs as a background daemon thread.
-  2. Streamlit dashboard (app/streamlit/dashboard.py) — runs in the main thread.
+  2. Dash dashboard   (app/dash/dashboard.py)     — runs in the main thread.
 
 The dashboard is the main thread so that the process exits cleanly when the
-browser tab / Streamlit window is closed; the webcam thread dies with it
-because it is a daemon.
+browser tab is closed; the webcam thread dies with it because it is a daemon.
+
+Open http://127.0.0.1:8050 in a browser after launching.
 """
 
 import subprocess
@@ -21,8 +22,8 @@ def run_webcam() -> None:
 
 
 def run_dashboard() -> None:
-    """Launch the Streamlit live dashboard as a subprocess."""
-    subprocess.run([sys.executable, "-m", "streamlit", "run", "app/streamlit/dashboard.py"])
+    """Launch the Dash live dashboard as a subprocess."""
+    subprocess.run([sys.executable, "app/dash/dashboard.py"])
 
 
 # Start the webcam pipeline in the background; it dies when the main thread exits.
