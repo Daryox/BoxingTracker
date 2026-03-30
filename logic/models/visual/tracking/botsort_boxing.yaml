@@ -1,0 +1,30 @@
+# BoT-SORT config tuned for boxing (2 fighters, moving camera, frequent occlusion).
+#
+# Key changes vs. the default botsort.yaml:
+#   with_reid: True       — enables appearance-based re-identification so fighters
+#                           keep their track ID through clinches and occlusions.
+#   track_buffer: 90      — holds lost tracks for ~3 seconds (default was 1 s).
+#                           Gives time for a fighter to re-emerge from a clinch.
+#   appearance_thresh: 0.6 — relaxed from 0.8 so the ReID model can match fighters
+#                           whose appearance changes slightly (sweat, rotation).
+#   proximity_thresh: 0.3  — relaxed from 0.5; fighters in a clinch may have low
+#                           IoU overlap when they separate.
+#   gmc_method: sparseOptFlow — keeps camera motion compensation active (essential
+#                           for handheld / moving camera footage).
+
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 90
+match_thresh: 0.8
+fuse_score: True
+
+# BoT-SORT specifics
+gmc_method: sparseOptFlow
+
+# ReID — enabled
+proximity_thresh: 0.3
+appearance_thresh: 0.6
+with_reid: True
+model: auto
