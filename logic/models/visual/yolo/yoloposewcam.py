@@ -53,12 +53,22 @@ def _atomic_write_json(path: Path, obj: dict) -> None:
     """
     Write *obj* to *path* atomically by writing to a .tmp file first, then
     renaming.  This prevents the dashboard from reading a partially-written file.
+
+    On Windows, os.replace() raises PermissionError if the target is held open
+    by another process (e.g. the dashboard reading it).  We retry a few times
+    with a short sleep before giving up silently — a skipped flush is harmless.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
-    os.replace(tmp, path)   # atomic on POSIX; nearly atomic on Windows
+    for _ in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.02)
+    tmp.unlink(missing_ok=True)  # give up — discard the tmp file cleanly
 
 
 # ── Event logger ──────────────────────────────────────────────────────────────

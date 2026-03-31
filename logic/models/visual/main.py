@@ -37,7 +37,7 @@ def main() -> None:
     app = YoloPoseWebcam(
         model_path=select_pose_model(),
         camera_index=cam_index,
-        img_size=640,
+        img_size=416,
         conf=0.25,
         show_fps=True,
     )
