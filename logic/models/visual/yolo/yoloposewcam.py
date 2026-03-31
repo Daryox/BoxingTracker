@@ -36,6 +36,7 @@ from logic.models.visual.punches.features import PoseFeatureExtractor
 from logic.models.visual.punches.proposal import PunchProposalEngine, PunchProposal
 from logic.models.ring.calibration import RingCalibration, RingCalibratorUI
 from logic.models.ring.position import RingPositionEstimator, RingHeatmap, HeatmapConfig
+from logic.models.visual.metrics import MetricsCollector
 
 # Torch / TCN are optional — the webcam pipeline runs without them (no classification).
 try:
@@ -964,6 +965,9 @@ class YoloPoseWebcam:
         # that a tracker re-ID after a clinch does not orphan per-fighter state.
         self.slot_mapper = _SlotMapper(iou_threshold=0.35)
 
+        # ── Performance metrics ───────────────────────────────────────────────
+        self.metrics = MetricsCollector(self.artifacts, device=self.device)
+
         # Auto-load ring calibration if a saved file exists.
         self._try_load_calibration()
 
@@ -1165,7 +1169,11 @@ class YoloPoseWebcam:
         fps_cap = self.cap.get(cv2.CAP_PROP_FPS)
         fps_cap = fps_cap if fps_cap and fps_cap > 1 else 30.0
 
+        self.metrics.begin_session()
+
         while True:
+            _frame_t0 = time.perf_counter()
+
             ret, frame_bgr = self.cap.read()
             if not ret:
                 print("Failed to read frame from camera — exiting.")
@@ -1176,6 +1184,7 @@ class YoloPoseWebcam:
             frame_idx += 1
 
             # ── YOLO tracking ────────────────────────────────────────────────
+            _yolo_t0 = time.perf_counter()
             results = self.model.track(
                 source=frame_bgr,
                 imgsz=self.img_size,
@@ -1184,6 +1193,7 @@ class YoloPoseWebcam:
                 tracker=self.tracker_cfg,
                 verbose=False,
             )
+            _yolo_ms = (time.perf_counter() - _yolo_t0) * 1000.0
             r = results[0]
             annotated = r.plot()  # frame with YOLO skeleton overlay
 
@@ -1267,6 +1277,11 @@ class YoloPoseWebcam:
                 self._draw_heatmap_inset(annotated)
                 self._draw_tooltips(annotated)
                 cv2.imshow("Boxing Tracker", annotated)
+                self.metrics.record_frame(
+                    yolo_ms=_yolo_ms,
+                    punch_engine_ms=0.0,
+                    frame_ms=(time.perf_counter() - _frame_t0) * 1000.0,
+                )
                 continue
 
             # ── Extract per-person data from YOLO output ──────────────────────
@@ -1284,6 +1299,7 @@ class YoloPoseWebcam:
             slots = self.slot_mapper.resolve(track_ids, det_xyxy)
 
             # ── Per-track processing ──────────────────────────────────────────
+            _punch_engine_ms = 0.0
             for i, (tid, slot) in enumerate(zip(track_ids, slots)):
                 bbox = det_xyxy[i]
                 kpts = kpts_k3[i]
@@ -1301,9 +1317,11 @@ class YoloPoseWebcam:
                         cv2.circle(annotated, tuple(map(int, img_xy)), 5, (255, 255, 255), -1)
 
                 # Punch detection and classification.
+                _pe_t0 = time.perf_counter()
                 punch_results = self.punch_engine.update_track(
                     track_id=int(slot), t=t, bbox_xyxy=bbox, kpts_k3=kpts,
                 )
+                _punch_engine_ms += (time.perf_counter() - _pe_t0) * 1000.0
 
                 # ── Overlay: fighter slot + last punch label + ring coords ──────
                 x1, y1, x2, y2 = map(int, bbox)
@@ -1357,9 +1375,21 @@ class YoloPoseWebcam:
             self._draw_tooltips(annotated)
             cv2.imshow("Boxing Tracker", annotated)
 
+            _frame_ms = (time.perf_counter() - _frame_t0) * 1000.0
+            self.metrics.record_frame(
+                yolo_ms=_yolo_ms,
+                punch_engine_ms=_punch_engine_ms,
+                frame_ms=_frame_ms,
+            )
+
         # ── Graceful shutdown ─────────────────────────────────────────────────
         try:
             self.logger.flush(heatmaps=self.heatmap.as_dict())
+        except Exception:
+            pass
+        try:
+            self.metrics.end_session()
+            print(f"[METRICS] Saved to {self.metrics.metrics_path}")
         except Exception:
             pass
         self.close()
