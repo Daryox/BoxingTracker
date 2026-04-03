@@ -26,7 +26,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -877,7 +877,7 @@ class YoloPoseWebcam:
     def __init__(
         self,
         model_path: str = "yolo11s-pose.pt",
-        camera_index: int = 0,
+        video_source: Union[int, str] = 0,
         img_size: int = 640,
         conf: float = 0.25,
         tracker_cfg: str = "logic/models/visual/tracking/botsort_boxing.yaml",
@@ -891,8 +891,8 @@ class YoloPoseWebcam:
         ----------
         model_path : str
             Path to the YOLO pose weights file.
-        camera_index : int
-            OpenCV VideoCapture device index.
+        video_source : int or str
+            Camera device index (int) or path to a video file (str).
         img_size : int
             YOLO inference resolution (square).
         conf : float
@@ -910,7 +910,7 @@ class YoloPoseWebcam:
         """
         # ── YOLO model ────────────────────────────────────────────────────────
         self.model       = YOLO(model_path)   # pose estimation + tracking model
-        self.camera_index = camera_index
+        self.video_source = video_source
         self.img_size    = img_size           # inference resolution
         self.conf        = conf               # detection confidence threshold
         self.tracker_cfg = tracker_cfg        # tracker algorithm config
@@ -986,12 +986,13 @@ class YoloPoseWebcam:
                 self.pos_est    = None
 
     def open_camera(self) -> None:
-        """Open the webcam capture at the configured index and request 1280×720."""
-        self.cap = cv2.VideoCapture(self.camera_index)
+        """Open the video source (webcam index or file path) for capture."""
+        self.cap = cv2.VideoCapture(self.video_source)
         if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open camera index {self.camera_index}")
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            raise RuntimeError(f"Could not open video source: {self.video_source!r}")
+        if isinstance(self.video_source, int):
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     def close(self) -> None:
         """Release the camera and destroy all OpenCV windows."""
@@ -1163,52 +1164,39 @@ class YoloPoseWebcam:
         print("  r — reset session counters and buffers")
         print("  [ — start round")
         print("  ] — end round")
+        if isinstance(self.video_source, str):
+            print("  Space — pause / resume")
+            print("  , — rewind 5 s")
+            print("  . — fast-forward 5 s")
 
         frame_idx = 0
         # Use the camera's reported FPS for frame-time computation; fall back to 30.
         fps_cap = self.cap.get(cv2.CAP_PROP_FPS)
         fps_cap = fps_cap if fps_cap and fps_cap > 1 else 30.0
 
+        _is_video = isinstance(self.video_source, str)
+        _seek_frames = int(fps_cap * 5)  # frames per 5-second seek
+        _paused = False
+        _last_annotated: Optional[np.ndarray] = None
+        _last_frame_bgr: Optional[np.ndarray] = None
+
         self.metrics.begin_session()
 
         while True:
             _frame_t0 = time.perf_counter()
 
-            ret, frame_bgr = self.cap.read()
-            if not ret:
-                print("Failed to read frame from camera — exiting.")
-                break
-
-            # Frame-based timestamp in seconds (stable, no wall-clock drift).
-            t = frame_idx / fps_cap
-            frame_idx += 1
-
-            # ── YOLO tracking ────────────────────────────────────────────────
-            _yolo_t0 = time.perf_counter()
-            results = self.model.track(
-                source=frame_bgr,
-                imgsz=self.img_size,
-                conf=self.conf,
-                persist=True,
-                tracker=self.tracker_cfg,
-                verbose=False,
-            )
-            _yolo_ms = (time.perf_counter() - _yolo_t0) * 1000.0
-            r = results[0]
-            annotated = r.plot()  # frame with YOLO skeleton overlay
-
             # ── Keyboard controls ─────────────────────────────────────────────
-            key = cv2.waitKey(1) & 0xFF
+            # Use a longer wait when paused so we stay responsive without
+            # burning CPU re-running YOLO on the same frozen frame.
+            key = cv2.waitKey(50 if _paused else 1) & 0xFF
 
             if key == ord("q"):
                 break
 
             if key == ord("h"):
-                # Toggle heatmap inset visibility.
                 self.show_heatmap_inset = not self.show_heatmap_inset
 
             if key == ord("r"):
-                # Reset all per-session state.
                 self.punch_engine.reset()
                 self.slot_mapper.reset()
                 self.heatmap = RingHeatmap(HeatmapConfig(bins=5))
@@ -1248,20 +1236,78 @@ class YoloPoseWebcam:
                     print(f"[ROUND] Round {self.round_number} ended — "
                           f"{int(duration // 60)}:{int(duration % 60):02d}")
 
-            if key == ord("c"):
+            if key == ord("c") and _last_frame_bgr is not None:
                 # Interactive ring corner calibration.
                 ui    = RingCalibratorUI(ring_size=(1000, 1000))
-                calib = ui.calibrate_from_frame(frame_bgr.copy())
+                calib = ui.calibrate_from_frame(_last_frame_bgr.copy())
                 if calib:
                     self.ring_calib = calib
                     self.pos_est    = RingPositionEstimator(calib)
                     calib.save(self.calib_path)
-                    # Fresh heatmap after recalibration.
                     self.heatmap = RingHeatmap(HeatmapConfig(bins=5))
                     self.logger.flush(heatmaps=self.heatmap.as_dict())
                     print(f"[RING] Saved calibration: {self.calib_path}")
 
+            # ── Video-only controls ───────────────────────────────────────────
+            if _is_video:
+                if key == ord(" "):
+                    _paused = not _paused
+                    print("[VIDEO] Paused." if _paused else "[VIDEO] Resumed.")
+
+                if key == ord(","):
+                    # Rewind 5 seconds.
+                    new_pos = max(0, self.cap.get(cv2.CAP_PROP_POS_FRAMES) - _seek_frames)
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, new_pos)
+                    frame_idx = max(0, frame_idx - _seek_frames)
+                    _last_annotated = None  # force re-process after seek
+                    print(f"[VIDEO] Rewound to frame {int(new_pos)}.")
+
+                if key == ord("."):
+                    # Fast-forward 5 seconds.
+                    new_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES) + _seek_frames
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, new_pos)
+                    frame_idx += _seek_frames
+                    _last_annotated = None  # force re-process after seek
+                    print(f"[VIDEO] Jumped to frame {int(new_pos)}.")
+
             self._poll_command()
+
+            # ── Pause: hold the last processed frame on screen ────────────────
+            if _paused and _last_annotated is not None:
+                display = _last_annotated.copy()
+                h, w = display.shape[:2]
+                cv2.putText(display, "PAUSED", (w // 2 - 100, h // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 3, cv2.LINE_AA)
+                cv2.imshow("Boxing Tracker", display)
+                continue
+
+            ret, frame_bgr = self.cap.read()
+            if not ret:
+                if _is_video:
+                    print("End of video file — exiting.")
+                else:
+                    print("Failed to read frame from camera — exiting.")
+                break
+
+            _last_frame_bgr = frame_bgr
+
+            # Frame-based timestamp in seconds (stable, no wall-clock drift).
+            t = frame_idx / fps_cap
+            frame_idx += 1
+
+            # ── YOLO tracking ────────────────────────────────────────────────
+            _yolo_t0 = time.perf_counter()
+            results = self.model.track(
+                source=frame_bgr,
+                imgsz=self.img_size,
+                conf=self.conf,
+                persist=True,
+                tracker=self.tracker_cfg,
+                verbose=False,
+            )
+            _yolo_ms = (time.perf_counter() - _yolo_t0) * 1000.0
+            r = results[0]
+            annotated = r.plot()  # frame with YOLO skeleton overlay
 
             # ── Skip frame if no detections or tracking IDs ──────────────────
             if (
@@ -1276,6 +1322,7 @@ class YoloPoseWebcam:
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
                 self._draw_heatmap_inset(annotated)
                 self._draw_tooltips(annotated)
+                _last_annotated = annotated
                 cv2.imshow("Boxing Tracker", annotated)
                 self.metrics.record_frame(
                     yolo_ms=_yolo_ms,
@@ -1373,6 +1420,7 @@ class YoloPoseWebcam:
             self._draw_round_hud(annotated)
             self._draw_heatmap_inset(annotated)
             self._draw_tooltips(annotated)
+            _last_annotated = annotated
             cv2.imshow("Boxing Tracker", annotated)
 
             _frame_ms = (time.perf_counter() - _frame_t0) * 1000.0

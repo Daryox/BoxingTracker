@@ -1,21 +1,20 @@
 {
-  "ts": 1774905909.7227821,
-  "total_punches": 3,
+  "ts": 1774965643.28392,
+  "total_punches": 4,
   "landed": 0,
-  "missed": 3,
+  "missed": 4,
   "punch_type_counts": {
-    "jab": 1,
-    "unknown": 2
+    "rear_hook": 4
   },
   "last_events": [
     {
-      "ts": 1774905816.9923391,
+      "ts": 1774965631.4250283,
       "event_type": "punch",
       "fighter_id": 0,
-      "arm": "R",
-      "t_peak": 0.06666666666666667,
-      "punch_type": "jab",
-      "confidence": 0.43767139315605164,
+      "arm": "L",
+      "t_peak": 2.6666666666666665,
+      "punch_type": "rear_hook",
+      "confidence": 0.7056768536567688,
       "landed": false,
       "ring_uv01": null,
       "img_xy": null,
@@ -23,15 +22,46 @@
       "round_elapsed_s": null
     },
     {
-      "ts": 1774905899.294989,
-      "event_type": "round_start",
-      "round": 1
+      "ts": 1774965631.9375336,
+      "event_type": "punch",
+      "fighter_id": 0,
+      "arm": "R",
+      "t_peak": 2.933333333333333,
+      "punch_type": "rear_hook",
+      "confidence": 0.8651451468467712,
+      "landed": false,
+      "ring_uv01": null,
+      "img_xy": null,
+      "round": null,
+      "round_elapsed_s": null
     },
     {
-      "ts": 1774905903.8617709,
-      "event_type": "round_end",
-      "round": 1,
-      "duration_s": 4.57
+      "ts": 1774965633.3357222,
+      "event_type": "punch",
+      "fighter_id": 0,
+      "arm": "R",
+      "t_peak": 3.4,
+      "punch_type": "rear_hook",
+      "confidence": 0.9636577367782593,
+      "landed": false,
+      "ring_uv01": null,
+      "img_xy": null,
+      "round": null,
+      "round_elapsed_s": null
+    },
+    {
+      "ts": 1774965635.7029283,
+      "event_type": "punch",
+      "fighter_id": 0,
+      "arm": "L",
+      "t_peak": 4.166666666666667,
+      "punch_type": "rear_hook",
+      "confidence": 0.9993056058883667,
+      "landed": false,
+      "ring_uv01": null,
+      "img_xy": null,
+      "round": null,
+      "round_elapsed_s": null
     }
   ],
   "heatmaps": {}
