@@ -11,8 +11,8 @@ Tracked metrics
 - punch_engine_ms : PunchEngine.update_track() wall-clock time (all tracks, per frame)
 - frame_ms        : total pipeline time per frame (yolo + per-track work + HUD)
 - cpu_percent     : process CPU utilisation sampled every SAMPLE_EVERY frames
-- gpu_util        : GPU utilisation % (if torch.cuda available)
-- gpu_vram_mb     : GPU VRAM used in MB (if torch.cuda available)
+- gpu_util        : GPU utilisation % (NVIDIA via pynvml, AMD via amdsmi)
+- gpu_vram_mb     : GPU VRAM used in MB (torch.cuda, works for NVIDIA and AMD)
 
 Usage
 -----
@@ -86,6 +86,7 @@ class MetricsCollector:
             Directory where metrics.json will be written.
         device : str
             PyTorch device string ("cpu", "cuda", "cuda:0", …).
+            Works for both NVIDIA (CUDA) and AMD (ROCm) GPUs.
         """
         self.artifacts_dir = artifacts_dir
         self.device = device
@@ -187,16 +188,26 @@ class MetricsCollector:
                 dev_idx = int(self.device.split(":")[-1]) if ":" in self.device else 0
                 mem = torch.cuda.memory_allocated(dev_idx) / 1024 / 1024
                 self._gpu_vram_mb.append(mem)
-                # torch does not expose GPU utilisation directly; we record VRAM only.
-                # (nvidia-smi util% requires pynvml — skip if unavailable.)
+                # Try NVIDIA (pynvml) first, then AMD (amdsmi) for utilisation %.
+                _util_recorded = False
                 try:
                     from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetUtilizationRates
                     nvmlInit()
                     handle = nvmlDeviceGetHandleByIndex(dev_idx)
                     util = nvmlDeviceGetUtilizationRates(handle)
                     self._gpu_util.append(float(util.gpu))
+                    _util_recorded = True
                 except Exception:
                     pass
+                if not _util_recorded:
+                    try:
+                        import amdsmi
+                        amdsmi.amdsmi_init()
+                        handles = amdsmi.amdsmi_get_processor_handles()
+                        info = amdsmi.amdsmi_get_gpu_activity(handles[dev_idx])
+                        self._gpu_util.append(float(info["gfx_activity"]))
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

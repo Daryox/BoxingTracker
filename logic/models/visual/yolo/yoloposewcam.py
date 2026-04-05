@@ -37,6 +37,7 @@ from logic.models.visual.punches.proposal import PunchProposalEngine, PunchPropo
 from logic.models.ring.calibration import RingCalibration, RingCalibratorUI
 from logic.models.ring.position import RingPositionEstimator, RingHeatmap, HeatmapConfig
 from logic.models.visual.metrics import MetricsCollector
+from logic.models.visual.device import select_device
 
 # Torch / TCN are optional — the webcam pipeline runs without them (no classification).
 try:
@@ -956,7 +957,7 @@ class YoloPoseWebcam:
         self.show_heatmap_inset = True  # toggle with 'h' key
 
         # ── TCN inference ─────────────────────────────────────────────────────
-        self.device   = "cpu"             # CPU inference by default
+        self.device   = select_device()   # auto-detects CUDA/ROCm or falls back to CPU
         self.tcn_ckpt = Path(tcn_ckpt)
         self.tcn: Optional[TCNInference] = None
 
@@ -1344,6 +1345,7 @@ class YoloPoseWebcam:
                 conf=self.conf,
                 persist=True,
                 tracker=self.tracker_cfg,
+                device=self.device,
                 verbose=False,
             )
             _yolo_ms = (time.perf_counter() - _yolo_t0) * 1000.0
