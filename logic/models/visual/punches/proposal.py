@@ -98,11 +98,11 @@ class ProposalConfig:
     #   straight fires when angle_delta >= 0.20  AND outward_disp >= 0.06
     #   bent    fires when angle_delta <  0.12  AND outward_disp <  0.03
     # The gap (0.12–0.20 / 0.03–0.06) covers ambiguous partial extensions.
-    bent_speed_on: float = 1.20         # slightly higher bar than straights
-    bent_accel_on: float = 6.0          # same burst requirement
-    bent_max_angle_delta: float = 0.12  # arm must NOT be extending (< ~7°)
+    bent_speed_on: float = 1.40         # higher bar to reduce false triggers
+    bent_accel_on: float = 7.0          # stronger burst required
+    bent_max_angle_delta: float = 0.10  # arm must NOT be extending (< ~6°)
     bent_max_outward_disp: float = 0.03 # wrist must NOT push radially outward
-    bent_tang_speed_on: float = 0.80    # wrist must be sweeping tangentially
+    bent_tang_speed_on: float = 1.00    # stronger tangential sweep required
 
     # Smoothing
     vel_ema_alpha: float = 0.7

@@ -229,6 +229,11 @@ class TCNInference:
         # Reverse mapping for converting output indices to human-readable labels.
         self.idx_to_class: Dict[int, str] = {v: k for k, v in self.class_to_idx.items()}
 
+        # Per-class logit penalties (subtracted before softmax).
+        # A positive value makes a class harder to predict; tune without retraining.
+        # e.g. {"rear_hook": 1.0} subtracts 1.0 from the rear_hook logit.
+        self.class_penalties: Dict[str, float] = {}
+
     @torch.inference_mode()
     def predict(self, x_tf: np.ndarray) -> Tuple[str, float]:
         """
@@ -247,9 +252,16 @@ class TCNInference:
         """
         # Add batch dimension: (T, F) → (1, T, F)
         x = torch.from_numpy(x_tf.astype(np.float32)).unsqueeze(0).to(self.device)
-        logits = self.model(x)              # (1, num_classes)
-        probs  = torch.softmax(logits, dim=-1)[0]
-        idx    = int(torch.argmax(probs).item())
+        logits = self.model(x).clone()      # (1, num_classes)
+
+        # Apply per-class logit penalties before softmax.
+        for cls_name, penalty in self.class_penalties.items():
+            idx = self.class_to_idx.get(cls_name)
+            if idx is not None:
+                logits[0, idx] -= penalty
+
+        probs = torch.softmax(logits, dim=-1)[0]
+        idx   = int(torch.argmax(probs).item())
         return self.idx_to_class.get(idx, "unknown"), float(probs[idx].item())
 
 
@@ -951,6 +963,11 @@ class YoloPoseWebcam:
         if self.tcn_ckpt.exists():
             try:
                 self.tcn = TCNInference(self.tcn_ckpt, device=self.device)
+                # Subtract from the rear_hook logit before softmax so it only
+                # wins when clearly more confident than the alternatives.
+                # Increase this value if rear_hook is still over-predicted;
+                # decrease it if genuine rear hooks are being missed.
+                self.tcn.class_penalties = {"rear_hook": 1.0}
                 print(f"[TCN] Loaded checkpoint: {self.tcn_ckpt}")
             except Exception as e:
                 print(f"[TCN] Failed to load {self.tcn_ckpt}: {e}")
@@ -958,7 +975,7 @@ class YoloPoseWebcam:
             print(f"[TCN] No checkpoint at {self.tcn_ckpt} — running without classification.")
 
         # ── Punch engine ──────────────────────────────────────────────────────
-        self.punch_engine = PunchEngine(self.tcn, seq_len=tcn_seq_len, min_conf=0.15)
+        self.punch_engine = PunchEngine(self.tcn, seq_len=tcn_seq_len, min_conf=0.25)
 
         # ── Stable slot mapper ────────────────────────────────────────────────
         # Translates YOLO's raw track IDs to stable fighter slots (0, 1, …) so
@@ -1093,6 +1110,30 @@ class YoloPoseWebcam:
                 }, heatmaps=self.heatmap.as_dict())
                 print(f"[ROUND] Round {self.round_number} ended (via dashboard) — "
                       f"{int(duration // 60)}:{int(duration % 60):02d}")
+
+        elif cmd == "round_next":
+            # End the current round (if active) then immediately start the next one.
+            now = time.time()
+            if self.round_active:
+                duration = now - self.round_start_t
+                self.round_active = False
+                self.logger.add_event({
+                    "ts":         now,
+                    "event_type": "round_end",
+                    "round":      self.round_number,
+                    "duration_s": round(duration, 2),
+                }, heatmaps=self.heatmap.as_dict())
+                print(f"[ROUND] Round {self.round_number} ended (next-round) — "
+                      f"{int(duration // 60)}:{int(duration % 60):02d}")
+            self.round_number += 1
+            self.round_active  = True
+            self.round_start_t = time.time()
+            self.logger.add_event({
+                "ts":         self.round_start_t,
+                "event_type": "round_start",
+                "round":      self.round_number,
+            }, heatmaps=self.heatmap.as_dict())
+            print(f"[ROUND] Round {self.round_number} started (via next-round).")
 
     def _draw_tooltips(self, frame: np.ndarray) -> None:
         """
@@ -1389,24 +1430,25 @@ class YoloPoseWebcam:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA,
                     )
 
-                # ── Log completed punch events ────────────────────────────────
-                for pr in punch_results:
-                    now = time.time()
-                    event = {
-                        "ts":               now,
-                        "event_type":       "punch",
-                        "fighter_id":       pr.track_id,
-                        "arm":              pr.arm,
-                        "t_peak":           pr.t_peak,
-                        "punch_type":       pr.label,
-                        "confidence":       pr.conf,
-                        "landed":           pr.landed,
-                        "ring_uv01":        ring_uv01,
-                        "img_xy":           img_xy,
-                        "round":            self.round_number if self.round_active else None,
-                        "round_elapsed_s":  round(now - self.round_start_t, 2) if self.round_active else None,
-                    }
-                    self.logger.add_event(event, heatmaps=self.heatmap.as_dict())
+                # ── Log completed punch events (only during an active round) ──
+                if self.round_active:
+                    for pr in (r for r in punch_results if r.label != "unknown"):
+                        now = time.time()
+                        event = {
+                            "ts":               now,
+                            "event_type":       "punch",
+                            "fighter_id":       pr.track_id,
+                            "arm":              pr.arm,
+                            "t_peak":           pr.t_peak,
+                            "punch_type":       pr.label,
+                            "confidence":       pr.conf,
+                            "landed":           pr.landed,
+                            "ring_uv01":        ring_uv01,
+                            "img_xy":           img_xy,
+                            "round":            self.round_number,
+                            "round_elapsed_s":  round(now - self.round_start_t, 2),
+                        }
+                        self.logger.add_event(event, heatmaps=self.heatmap.as_dict())
 
             # Prune impact detector history for slots no longer in the scene.
             self.punch_engine.impact.cleanup(list(slots))
