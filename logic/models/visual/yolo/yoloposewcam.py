@@ -860,7 +860,11 @@ class _SlotMapper:
                         del self._tid_to_slot[t]
                     slot = best_slot
                 else:
-                    # Genuinely new person — allocate the next slot.
+                    # Genuinely new person — allocate the next slot only if
+                    # we haven't reached the two-fighter cap.
+                    if self._next_slot >= 2:
+                        slots[i] = -1
+                        continue
                     slot = self._next_slot
                     self._next_slot += 1
 
@@ -964,11 +968,16 @@ class YoloPoseWebcam:
         if self.tcn_ckpt.exists():
             try:
                 self.tcn = TCNInference(self.tcn_ckpt, device=self.device)
-                # Subtract from the rear_hook logit before softmax so it only
-                # wins when clearly more confident than the alternatives.
-                # Increase this value if rear_hook is still over-predicted;
-                # decrease it if genuine rear hooks are being missed.
-                self.tcn.class_penalties = {"rear_hook": 1.0}
+                # Logit adjustments applied before softmax.
+                # Positive values penalise a class (subtract from logit → less likely).
+                # Negative values boost a class (add to logit → more likely).
+                # Increase lead_hook penalty if it's still over-predicted;
+                # decrease cross penalty if crosses are being missed.
+                self.tcn.class_penalties = {
+                    "rear_hook":  1.0,   # suppress rear_hook false positives
+                    "lead_hook":  0.6,   # lead_hook is over-represented
+                    "cross":     -0.4,   # cross is under-represented
+                }
                 print(f"[TCN] Loaded checkpoint: {self.tcn_ckpt}")
             except Exception as e:
                 print(f"[TCN] Failed to load {self.tcn_ckpt}: {e}")
@@ -1391,6 +1400,8 @@ class YoloPoseWebcam:
             # ── Per-track processing ──────────────────────────────────────────
             _punch_engine_ms = 0.0
             for i, (tid, slot) in enumerate(zip(track_ids, slots)):
+                if slot < 0:   # capped out — more than 2 people detected
+                    continue
                 bbox = det_xyxy[i]
                 kpts = kpts_k3[i]
 
@@ -1453,7 +1464,7 @@ class YoloPoseWebcam:
                         self.logger.add_event(event, heatmaps=self.heatmap.as_dict())
 
             # Prune impact detector history for slots no longer in the scene.
-            self.punch_engine.impact.cleanup(list(slots))
+            self.punch_engine.impact.cleanup([s for s in slots if s >= 0])
 
             # ── HUD: FPS counter + round indicator + heatmap inset ───────────
             self._update_fps()
